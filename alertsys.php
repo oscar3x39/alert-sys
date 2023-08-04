@@ -30,7 +30,7 @@ foreach ($now_filename_arr as $filename => $status) {
         // read file && slack
         $fp = @fopen($filename, "r");
         if ($fp) {
-            fseek($fp, $past_filename_arr[$filename]['size'] + 1);
+            fseek($fp, $past_filename_arr[$filename]['size']);
             while (($buffer = fgets($fp, 4096)) !== false) {
                 echo "post slack message".PHP_EOL;
                 slack($buffer, $ini['SLACK_CHANNEL']);

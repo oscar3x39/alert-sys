@@ -1,6 +1,8 @@
-# alert-sys
-
 ## Environments
+```
+apt install php
+apt install php-curl
+```
 
 ```
 LOG_PATH=./logs

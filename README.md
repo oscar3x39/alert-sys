@@ -1,8 +1,10 @@
 ## Environments
 ```
-apt install php
-apt install php-curl
+$ apt install php
+$ apt install php-curl
 ```
+
+## Setting Configuartion
 
 ```
 LOG_PATH=./logs

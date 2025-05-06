@@ -1,65 +1,150 @@
 <?php
 
-$ini = parse_ini_file("./alertsys.ini");
+declare(strict_types=1);
 
-$log_files = glob($ini['LOG_PATH'] . "/*.log");
+class LogMonitor
+{
+    private readonly array $config;
+    private array $currentStats = [];
 
-$now_filename_arr = [];
-foreach ($log_files as $filename) {
-    $now_filename_arr[$filename] = [
-        "line" => count(file($filename)),
-        "size" => filesize($filename)
-    ];
-}
+    public function __construct(array $config)
+    {
+        $this->validateConfig($config);
+        $this->config = $config;
+    }
 
-if (!file_exists($ini['STATUS_FILE'])) {
-    echo "check file exists ...".PHP_EOL;
-    file_put_contents($ini['STATUS_FILE'], serialize($now_filename_arr));
-    echo "created file status and exit";
-    exit;
-}
+    public function run(): void
+    {
+        $this->scanLogFiles();
 
-$past_filename_arr = unserialize(file_get_contents($ini['STATUS_FILE']));
-
-foreach ($now_filename_arr as $filename => $status) {
-
-    echo "check if have new logs ...".PHP_EOL;
-
-    if ($status['size'] > $past_filename_arr[$filename]['size']) {
-
-        // read file && slack
-        $fp = @fopen($filename, "r");
-        if ($fp) {
-            fseek($fp, $past_filename_arr[$filename]['size']);
-            while (($buffer = fgets($fp, 4096)) !== false) {
-                echo "post slack message".PHP_EOL;
-                slack($buffer, $ini['SLACK_CHANNEL']);
-            }
-            if (!feof($fp)) {
-                fclose($fp);
-            }
-            fclose($fp);
+        if (!file_exists($this->config['STATUS_FILE'])) {
+            $this->initStatusFile();
+            return;
         }
-    } else {
-        echo "doesnt have any new message ...".PHP_EOL;
+
+        $this->processChanges();
+        $this->saveStatus();
+    }
+
+    private function validateConfig(array $config): void
+    {
+        $required = ['LOG_PATH', 'STATUS_FILE', 'SLACK_CHANNEL'];
+        foreach ($required as $key) {
+            if (empty($config[$key])) {
+                throw new InvalidArgumentException("缺少設定參數：$key");
+            }
+        }
+        if (!is_dir($config['LOG_PATH'])) {
+            throw new InvalidArgumentException("LOG_PATH 不是有效目錄");
+        }
+    }
+
+    private function scanLogFiles(): void
+    {
+        $logFiles = glob($this->config['LOG_PATH'] . '/*.log');
+        foreach ($logFiles as $filename) {
+            $this->currentStats[$filename] = [
+                'line' => $this->countLines($filename),
+                'size' => filesize($filename)
+            ];
+        }
+    }
+
+    private function countLines(string $filename): int
+    {
+        $file = fopen($filename, 'r');
+        $lines = 0;
+        while (!feof($file)) {
+            $lines += substr_count(fread($file, 8192), "\n");
+        }
+        fclose($file);
+        return $lines;
+    }
+
+    private function initStatusFile(): void
+    {
+        file_put_contents($this->config['STATUS_FILE'], serialize($this->currentStats));
+        echo "初始化狀態檔完成，已退出。" . PHP_EOL;
+    }
+
+    private function loadPreviousStats(): array
+    {
+        $content = @file_get_contents($this->config['STATUS_FILE']);
+        if ($content === false) {
+            throw new RuntimeException("無法讀取狀態檔");
+        }
+        $data = @unserialize($content);
+        if (!is_array($data)) {
+            throw new RuntimeException("狀態檔格式錯誤");
+        }
+        return $data;
+    }
+
+    private function processChanges(): void
+    {
+        $pastStats = $this->loadPreviousStats();
+
+        foreach ($this->currentStats as $filename => $status) {
+            echo "檢查是否有新日誌..." . PHP_EOL;
+            $past = $pastStats[$filename] ?? ['size' => 0];
+            if ($status['size'] > ($past['size'] ?? 0)) {
+                $newContent = $this->getNewContent($filename, $past['size'] ?? 0);
+                if ($newContent !== '') {
+                    echo "發送 Slack 訊息..." . PHP_EOL;
+                    $this->sendToSlack($newContent);
+                }
+            } else {
+                echo "沒有新訊息。" . PHP_EOL;
+            }
+        }
+    }
+
+    private function getNewContent(string $filename, int $offset): string
+    {
+        $fp = fopen($filename, 'r');
+        if ($fp === false) {
+            return '';
+        }
+        fseek($fp, $offset);
+        $content = stream_get_contents($fp);
+        fclose($fp);
+        return $content ?: '';
+    }
+
+    private function saveStatus(): void
+    {
+        file_put_contents($this->config['STATUS_FILE'], serialize($this->currentStats));
+    }
+
+    private function sendToSlack(string $message): void
+    {
+        $payload = [
+            'payload' => json_encode([
+                'text' => "``````",
+            ])
+        ];
+        $ch = curl_init("https://hooks.slack.com/services/{$this->config['SLACK_CHANNEL']}");
+        curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $payload);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+        $result = curl_exec($ch);
+        if ($result === false) {
+            error_log("Slack 傳送失敗：" . curl_error($ch));
+        }
+        curl_close($ch);
     }
 }
 
-file_put_contents($ini['STATUS_FILE'], serialize($now_filename_arr));
-
-function slack($message, $channel)
-{
-    $ch = curl_init("https://hooks.slack.com/services/$channel");
-    $data = ['payload' => json_encode(
-        [
-            "text" => "```\n".$message."\n```",
-        ]
-    )];
-    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    $result = curl_exec($ch);
-    curl_close($ch);
-    return $result;
+// 主程式入口
+try {
+    $ini = parse_ini_file('./alertsys.ini');
+    if ($ini === false) {
+        throw new RuntimeException("無法讀取設定檔");
+    }
+    $monitor = new LogMonitor($ini);
+    $monitor->run();
+} catch (Throwable $e) {
+    error_log("[CRITICAL] LogMonitor 失敗：" . $e->getMessage());
+    exit(1);
 }
